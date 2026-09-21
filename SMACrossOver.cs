@@ -23,8 +23,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				Name		= "SMACrossOver";
 				Fast		= 10;
 				Slow		= 200;
-				TP			= 10;
-				SL			= 20;
+				TP		= 80;
+				SL		= 15;
 				// This strategy has been designed to take advantage of performance gains in Strategy Analyzer optimizations
 				// See the Help Guide for additional information
 				IsInstantiatedOnEachOptimizationIteration = false;
