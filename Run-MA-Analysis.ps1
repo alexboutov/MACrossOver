@@ -64,7 +64,7 @@ if ($Attachments.Count -eq 0) {
 $Subject = ("$vpsName" + "Trade Analysis Report - $ReportDate").Trim()
 
 $BodyLines = [System.Collections.Generic.List[string]]::new()
-$BodyLines.Add("TTP Trend Candles3.3 Analysis Report - $ReportDate")
+$BodyLines.Add("Trades Analysis Report - $ReportDate")
 $BodyLines.Add("")
 
 # Returns a section's lines: from its "=== HEADER ..." line up to the next "=== " header.

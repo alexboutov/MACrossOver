@@ -14,6 +14,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 	{
 		private SMA smaFast;
 		private SMA smaSlow;
+		private RSI rsi;
 
 		protected override void OnStateChange()
 		{
@@ -23,8 +24,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				Name		= "SMACrossOver";
 				Fast		= 10;
 				Slow		= 200;
-				TP		= 80;
-				SL		= 15;
+				TP			= 10;
+				SL			= 20;
+				RsiPeriod	= 14;
+				RsiSmooth	= 3;
+				RsiLower	= 30;
+				RsiUpper	= 70;
 				// This strategy has been designed to take advantage of performance gains in Strategy Analyzer optimizations
 				// See the Help Guide for additional information
 				IsInstantiatedOnEachOptimizationIteration = false;
@@ -33,12 +38,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				smaFast = SMA(Fast);
 				smaSlow = SMA(Slow);
+				rsi		= RSI(RsiPeriod, RsiSmooth);
 
 				smaFast.Plots[0].Brush = Brushes.Goldenrod;
 				smaSlow.Plots[0].Brush = Brushes.SeaGreen;
 
 				AddChartIndicator(smaFast);
 				AddChartIndicator(smaSlow);
+				AddChartIndicator(rsi);
 
 				SetProfitTarget(CalculationMode.Ticks, TP);
 				SetStopLoss(CalculationMode.Ticks, SL);
@@ -53,30 +60,45 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (Position.MarketPosition != MarketPosition.Flat)
 				return;
 
-			if (CrossAbove(smaFast, smaSlow, 1))
+			// Long: SMA cross up and RSI not overbought. Short: SMA cross down and RSI not oversold.
+			if (CrossAbove(smaFast, smaSlow, 1) && rsi[0] < RsiUpper)
 				EnterLong();
-			else if (CrossBelow(smaFast, smaSlow, 1))
+			else if (CrossBelow(smaFast, smaSlow, 1) && rsi[0] > RsiLower)
 				EnterShort();
 		}
 
 		#region Properties
 		[Range(1, int.MaxValue), NinjaScriptProperty]
-		// [Display(ResourceType = typeof(Custom.Resource), Name = "Fast", GroupName = "NinjaScriptStrategyParameters", Order = 0)]
-		[Display(Name = "Fast (bars)", GroupName = "StrategyParameters", Order = 0)]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "Fast", GroupName = "NinjaScriptStrategyParameters", Order = 0)]
 		public int Fast { get; set; }
 
-		[Range(2, int.MaxValue), NinjaScriptProperty]
-		//[Display(ResourceType = typeof(Custom.Resource), Name = "Slow", GroupName = "NinjaScriptStrategyParameters", Order = 1)]
-		[Display(Name = "Slow (bars)", GroupName = "StrategyParameters", Order = 1)]
+		[Range(1, int.MaxValue), NinjaScriptProperty]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "Slow", GroupName = "NinjaScriptStrategyParameters", Order = 1)]
 		public int Slow { get; set; }
 
 		[Range(1, int.MaxValue), NinjaScriptProperty]
-		[Display(Name = "TP (ticks)", GroupName = "StrategyParameters", Order = 2)]
+		[Display(Name = "TP (ticks)", GroupName = "NinjaScriptStrategyParameters", Order = 2)]
 		public int TP { get; set; }
 
 		[Range(1, int.MaxValue), NinjaScriptProperty]
-		[Display(Name = "SL (ticks)", GroupName = "StrategyParameters", Order = 3)]
+		[Display(Name = "SL (ticks)", GroupName = "NinjaScriptStrategyParameters", Order = 3)]
 		public int SL { get; set; }
+
+		[Range(1, int.MaxValue), NinjaScriptProperty]
+		[Display(Name = "RSI Period", GroupName = "NinjaScriptStrategyParameters", Order = 4)]
+		public int RsiPeriod { get; set; }
+
+		[Range(1, int.MaxValue), NinjaScriptProperty]
+		[Display(Name = "RSI Smooth", GroupName = "NinjaScriptStrategyParameters", Order = 5)]
+		public int RsiSmooth { get; set; }
+
+		[Range(0, 100), NinjaScriptProperty]
+		[Display(Name = "RSI Lower", GroupName = "NinjaScriptStrategyParameters", Order = 6)]
+		public int RsiLower { get; set; }
+
+		[Range(0, 100), NinjaScriptProperty]
+		[Display(Name = "RSI Upper", GroupName = "NinjaScriptStrategyParameters", Order = 7)]
+		public int RsiUpper { get; set; }
 		#endregion
 	}
 }
