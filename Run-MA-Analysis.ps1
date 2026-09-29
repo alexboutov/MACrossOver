@@ -80,6 +80,24 @@ function Get-ReportSection([string[]]$lines, [string]$header) {
     return $lines[$s..($e - 1)]
 }
 
+# Returns the LAST "=== INDIVIDUAL TRADES - <date> ===" section (most recent trading day),
+# from its header through the line before the next "=== " header, trailing blanks trimmed.
+function Get-LastDayTrades([string]$txtPath) {
+    $all = @(Get-Content $txtPath)
+    $s = -1
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        if ($all[$i] -like '=== INDIVIDUAL TRADES*') { $s = $i }
+    }
+    if ($s -lt 0) { return @() }
+    $e = $all.Count
+    for ($i = $s + 1; $i -lt $all.Count; $i++) {
+        if ($all[$i] -like '=== *') { $e = $i; break }
+    }
+    $sec = @($all[$s..($e - 1)])
+    while ($sec.Count -gt 0 -and $sec[$sec.Count - 1].Trim() -eq '') { $sec = @($sec[0..($sec.Count - 2)]) }
+    return $sec
+}
+
 # Extracts the email-body portion of one report file:
 # everything from the top through the end of TIME OF DAY ANALYSIS,
 # plus the per-instrument daily equity curves.
@@ -104,6 +122,19 @@ function Get-ReportBodyLines([string]$txtPath) {
 
     while ($out.Count -gt 0 -and $out[$out.Count - 1] -eq '') { $out.RemoveAt($out.Count - 1) }
     return $out
+}
+
+# --- Last trading day's individual trades, at the very top of the body ---
+foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
+                   @{ Label = "DISCRETIONARY"; Path = $TxtReportDisc })) {
+    if (Test-Path $src.Path) {
+        $dayTrades = @(Get-LastDayTrades $src.Path)
+        if ($dayTrades.Count -gt 0) {
+            $BodyLines.Add("[$($src.Label)]")
+            foreach ($ln in $dayTrades) { $BodyLines.Add($ln) }
+            $BodyLines.Add("")
+        }
+    }
 }
 
 # --- Section 1: TTP bot ---
@@ -140,6 +171,18 @@ $redStyle   = 'color:#c62828;font-weight:bold;'
 $greenStyle = 'color:#2e7d32;font-weight:bold;'
 function Colorize-Line([string]$line) {
     $esc = [System.Net.WebUtility]::HtmlEncode($line)
+    # Individual trade row: color the whole row by the sign of PnL_$ (last numeric column)
+    if ($line -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}:\d{3}\s') {
+        if ($line -match '(\([\d,\.]+\)|-?[\d,\.]+)\s*\*?\s*$') {
+            $pv = $Matches[1]
+            if ($pv -match '^\(') { return "<span style=""$script:redStyle"">$esc</span>" }
+            $num = 0.0
+            if ([double]::TryParse(($pv -replace ',', ''), [ref]$num) -and $num -gt 0) {
+                return "<span style=""$script:greenStyle"">$esc</span>"
+            }
+        }
+        return $esc
+    }
     $targets = $null
     if     ($line -match '^\d{2}:00\s')            { $targets = @(5, 6, 7) }
     elseif ($line -match '^\s+\d{4}-\d{2}-\d{2}\s') { $targets = @(2, 3) }
