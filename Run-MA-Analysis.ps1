@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Wrapper: runs Get-MA-RoundTrips.ps1 then emails the report files.
     Designed to be called by Windows Task Scheduler daily.
@@ -98,6 +98,31 @@ function Get-LastDayTrades([string]$txtPath) {
     return $sec
 }
 
+# Given the trade-row lines returned by Get-LastDayTrades, sums PnL_$ per instrument
+# using the fixed-width columns the report writer uses (Instrument at 24..36, PnL_$ at 82..92).
+function Get-InstrumentTotals([string[]]$tradeLines) {
+    $totals = [ordered]@{}
+    foreach ($ln in $tradeLines) {
+        if ($ln.Length -lt 92 -or $ln -notmatch '^\d{4}-\d{2}-\d{2}\s') { continue }
+        $instr  = $ln.Substring(24, 12).Trim()
+        $pnlStr = $ln.Substring(82, 10).Trim()
+        if ([string]::IsNullOrWhiteSpace($instr) -or [string]::IsNullOrWhiteSpace($pnlStr)) { continue }
+        $isNeg = $pnlStr -match '^\('
+        $num = 0.0
+        if (-not [double]::TryParse(($pnlStr -replace '[()$,]', ''), [ref]$num)) { continue }
+        if ($isNeg) { $num = -[math]::Abs($num) }
+        if (-not $totals.Contains($instr)) { $totals[$instr] = 0.0 }
+        $totals[$instr] += $num
+    }
+    return $totals
+}
+
+# Formats a PnL total using the report's own accounting style: parens for negative, no sign for positive/zero.
+function Format-PnLTotal([double]$val) {
+    if ($val -lt 0) { return "(" + [math]::Abs($val).ToString("N0") + ")" }
+    return $val.ToString("N0")
+}
+
 # Extracts the email-body portion of one report file:
 # everything from the top through the end of TIME OF DAY ANALYSIS,
 # plus the per-instrument daily equity curves.
@@ -133,6 +158,17 @@ foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
             $BodyLines.Add("[$($src.Label)]")
             foreach ($ln in $dayTrades) { $BodyLines.Add($ln) }
             $BodyLines.Add("")
+
+            $totals = Get-InstrumentTotals $dayTrades
+            if ($totals.Count -gt 0) {
+                $BodyLines.Add("  Daily PnL by instrument:")
+                foreach ($instr in $totals.Keys) {
+                    $BodyLines.Add(("  {0,-12} {1,10}" -f $instr, (Format-PnLTotal $totals[$instr])))
+                }
+                $grand = ($totals.Values | Measure-Object -Sum).Sum
+                $BodyLines.Add(("  {0,-12} {1,10}" -f "TOTAL", (Format-PnLTotal $grand)))
+                $BodyLines.Add("")
+            }
         }
     }
 }
@@ -171,6 +207,16 @@ $redStyle   = 'color:#c62828;font-weight:bold;'
 $greenStyle = 'color:#2e7d32;font-weight:bold;'
 function Colorize-Line([string]$line) {
     $esc = [System.Net.WebUtility]::HtmlEncode($line)
+    # Per-instrument daily PnL total row (e.g. "  NQ DEC26         4,301" or "  TOTAL        (75)")
+    if ($line -match '^\s\s\S.*\s+(\([\d,\.]+\)|-?[\d,\.]+)\s*$' -and $line -notmatch '^\s\sDaily PnL by instrument:') {
+        $pv = $Matches[1]
+        if ($pv -match '^\(') { return "<span style=""$script:redStyle"">$esc</span>" }
+        $num = 0.0
+        if ([double]::TryParse(($pv -replace ',', ''), [ref]$num) -and $num -gt 0) {
+            return "<span style=""$script:greenStyle"">$esc</span>"
+        }
+        return $esc
+    }
     # Individual trade row: color the whole row by the sign of PnL_$ (last numeric column)
     if ($line -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}:\d{3}\s') {
         if ($line -match '(\([\d,\.]+\)|-?[\d,\.]+)\s*\*?\s*$') {
