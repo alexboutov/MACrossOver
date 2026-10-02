@@ -10,6 +10,7 @@ $env:Path += ";C:\Users\alexb\AppData\Local\Programs\Python\Python313;C:\Users\a
 $ScriptDir = "C:\Users\alexb\OneDrive\Documents\NinjaTrader 8\log"
 $AnalysisScript = Join-Path $ScriptDir "Get-MA-RoundTrips.ps1"
 $ReportDate = Get-Date -Format "MM-dd-yyyy"
+$TodayDateISO = Get-Date -Format "yyyy-MM-dd"
 $TxtReport  = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.txt"
 $HtmlReport = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.html"
 $PdfReport  = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.pdf"
@@ -80,13 +81,16 @@ function Get-ReportSection([string[]]$lines, [string]$header) {
     return $lines[$s..($e - 1)]
 }
 
-# Returns the LAST "=== INDIVIDUAL TRADES - <date> ===" section (most recent trading day),
+# Returns the "=== INDIVIDUAL TRADES - <targetDate> ===" section for the GIVEN date
+# (not merely whichever section happens to be last in the file - a tradeless day leaves
+# no section for today, and the previous day's section must NOT be mistaken for today's),
 # from its header through the line before the next "=== " header, trailing blanks trimmed.
-function Get-LastDayTrades([string]$txtPath) {
+function Get-LastDayTrades([string]$txtPath, [string]$targetDate) {
     $all = @(Get-Content $txtPath)
+    $header = "=== INDIVIDUAL TRADES - $targetDate ==="
     $s = -1
     for ($i = 0; $i -lt $all.Count; $i++) {
-        if ($all[$i] -like '=== INDIVIDUAL TRADES*') { $s = $i }
+        if ($all[$i].Trim() -eq $header) { $s = $i; break }
     }
     if ($s -lt 0) { return @() }
     $e = $all.Count
@@ -153,7 +157,7 @@ function Get-ReportBodyLines([string]$txtPath) {
 foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
                    @{ Label = "DISCRETIONARY"; Path = $TxtReportDisc })) {
     if (Test-Path $src.Path) {
-        $dayTrades = @(Get-LastDayTrades $src.Path)
+        $dayTrades = @(Get-LastDayTrades $src.Path $TodayDateISO)
         if ($dayTrades.Count -gt 0) {
             $BodyLines.Add("[$($src.Label)]")
             foreach ($ln in $dayTrades) { $BodyLines.Add($ln) }
@@ -169,6 +173,9 @@ foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
                 $BodyLines.Add(("  {0,-12} {1,10}" -f "TOTAL", (Format-PnLTotal $grand)))
                 $BodyLines.Add("")
             }
+        } elseif ($src.Label -eq "DISCRETIONARY") {
+            $BodyLines.Add("[NO DISCR TRADES TODAY]")
+            $BodyLines.Add("")
         }
     }
 }

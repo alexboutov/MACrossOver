@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Extract round-trip trade stats for 'SMACrossOver' from NinjaTrader 8 logs.
 .DESCRIPTION
@@ -69,18 +69,27 @@ if (-not $logFiles) {
 
 Write-Host "Processing $($logFiles.Count) log file(s)..." -ForegroundColor Cyan
 
-# The strategy trace logs "... 'SMACrossOver/<id>' submitting order",
-# followed by an order-state line containing Order='<orderId>/<account>'.
-# Collecting order IDs lets us attribute each fill to the bot specifically,
-# so DISCRETIONARY/MANUAL trades in the same account are EXCLUDED.
+# The strategy trace logs "... 'SMACrossOver/<id>' submitting order", near (not always
+# immediately after - NT8 sometimes logs the order's own Order='<id>/<account>' state line
+# a line or two BEFORE the trace fires, e.g. on instant-fill market orders) an order-state
+# line containing Order='<orderId>/<account>'. Rather than assuming strict next-line order,
+# find every "submitting order" trace, then scan a small window of lines around it (both
+# directions) for the first Order='<id>/<account>' line. Collecting order IDs this way lets
+# us attribute each fill to the bot specifically, so DISCRETIONARY/MANUAL trades in the same
+# account are EXCLUDED.
 $ttpOrderIds = @{}
 $ttpAccounts = @{}
+$ProximityWindow = 4   # lines to search before/after a "submitting order" trace
 
 foreach ($file in $logFiles) {
     $lines = Get-Content $file.FullName
-    for ($i = 0; $i -lt $lines.Count - 1; $i++) {
-        if ($lines[$i] -match "NinjaScript strategy 'SMACrossOver/\d+' submitting order") {
-            if ($lines[$i+1] -match "Order='([^/']+)/([^']+)'") {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch "NinjaScript strategy 'SMACrossOver/\d+' submitting order") { continue }
+        $lo = [math]::Max(0, $i - $ProximityWindow)
+        $hi = [math]::Min($lines.Count - 1, $i + $ProximityWindow)
+        for ($j = $lo; $j -le $hi; $j++) {
+            if ($j -eq $i) { continue }
+            if ($lines[$j] -match "Order='([^/']+)/([^']+)'") {
                 $ttpOrderIds[$Matches[1]] = $true
                 $ttpAccounts[$Matches[2]] = $true
             }
