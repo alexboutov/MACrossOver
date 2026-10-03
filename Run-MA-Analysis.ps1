@@ -14,6 +14,9 @@ $TodayDateISO = Get-Date -Format "yyyy-MM-dd"
 $TxtReport  = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.txt"
 $HtmlReport = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.html"
 $PdfReport  = Join-Path $ScriptDir "MARoundTripsAnalysis-$ReportDate.pdf"
+$TxtReportEma  = Join-Path $ScriptDir "EMARoundTripsAnalysis-$ReportDate.txt"
+$HtmlReportEma = Join-Path $ScriptDir "EMARoundTripsAnalysis-$ReportDate.html"
+$PdfReportEma  = Join-Path $ScriptDir "EMARoundTripsAnalysis-$ReportDate.pdf"
 $TxtReportDisc  = Join-Path $ScriptDir "DISCRoundTripsAnalysis-$ReportDate.txt"
 $HtmlReportDisc = Join-Path $ScriptDir "DISCRoundTripsAnalysis-$ReportDate.html"
 $PdfReportDisc  = Join-Path $ScriptDir "DISCRoundTripsAnalysis-$ReportDate.pdf"
@@ -52,6 +55,9 @@ $Attachments = @()
 if (Test-Path $PdfReport)      { $Attachments += $PdfReport }
 if (Test-Path $HtmlReport)     { $Attachments += $HtmlReport }
 if (Test-Path $TxtReport)      { $Attachments += $TxtReport }
+if (Test-Path $PdfReportEma)   { $Attachments += $PdfReportEma }
+if (Test-Path $HtmlReportEma)  { $Attachments += $HtmlReportEma }
+if (Test-Path $TxtReportEma)   { $Attachments += $TxtReportEma }
 if (Test-Path $PdfReportDisc)  { $Attachments += $PdfReportDisc }
 if (Test-Path $HtmlReportDisc) { $Attachments += $HtmlReportDisc }
 if (Test-Path $TxtReportDisc)  { $Attachments += $TxtReportDisc }
@@ -154,8 +160,11 @@ function Get-ReportBodyLines([string]$txtPath) {
 }
 
 # --- Last trading day's individual trades, at the very top of the body ---
-foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
-                   @{ Label = "DISCRETIONARY"; Path = $TxtReportDisc })) {
+# EmptyLabel = $null keeps a source silent on a tradeless day (MA STRATEGY's long-standing
+# behavior); a non-null EmptyLabel prints "[NO <EmptyLabel> TRADES TODAY]" instead.
+foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport;     EmptyLabel = $null },
+                   @{ Label = "EMA STRATEGY"; Path = $TxtReportEma;  EmptyLabel = "EMA" },
+                   @{ Label = "DISCRETIONARY"; Path = $TxtReportDisc; EmptyLabel = "DISCR" })) {
     if (Test-Path $src.Path) {
         $dayTrades = @(Get-LastDayTrades $src.Path $TodayDateISO)
         if ($dayTrades.Count -gt 0) {
@@ -173,8 +182,8 @@ foreach ($src in @(@{ Label = "MA STRATEGY";  Path = $TxtReport },
                 $BodyLines.Add(("  {0,-12} {1,10}" -f "TOTAL", (Format-PnLTotal $grand)))
                 $BodyLines.Add("")
             }
-        } elseif ($src.Label -eq "DISCRETIONARY") {
-            $BodyLines.Add("[NO DISCR TRADES TODAY]")
+        } elseif ($src.EmptyLabel) {
+            $BodyLines.Add("[NO $($src.EmptyLabel) TRADES TODAY]")
             $BodyLines.Add("")
         }
     }
@@ -189,6 +198,18 @@ if (Test-Path $TxtReport) {
     foreach ($ln in (Get-ReportBodyLines $TxtReport)) { $BodyLines.Add($ln) }
 } else {
     $BodyLines.Add("(No TTP bot trades in this period.)")
+}
+$BodyLines.Add("")
+
+# --- Section 1b: EMA strategy ---
+$BodyLines.Add("############################################################")
+$BodyLines.Add("#                        EMA STRATEGY                      #")
+$BodyLines.Add("############################################################")
+$BodyLines.Add("")
+if (Test-Path $TxtReportEma) {
+    foreach ($ln in (Get-ReportBodyLines $TxtReportEma)) { $BodyLines.Add($ln) }
+} else {
+    $BodyLines.Add("(No EMA bot trades in this period.)")
 }
 $BodyLines.Add("")
 

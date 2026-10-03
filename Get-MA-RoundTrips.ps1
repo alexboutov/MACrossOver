@@ -56,7 +56,17 @@ function Fmt-Pct([double]$num, [double]$den) {
 }
 
 # ============================================================
-# STEP 1: Discover SMACrossOver strategy ORDER IDs (and their accounts)
+# STRATEGIES TRACKED: add an entry here to track another bot.
+# Key = exact NinjaScript strategy class name as it appears in the log
+# trace "NinjaScript strategy '<Name>/<id>' submitting order".
+# ============================================================
+$StrategyBooks = [ordered]@{
+    'SMACrossOver' = @{ Label = 'MA BOT';  Title = 'SMACrossOver'; FilePrefix = 'MARoundTripsAnalysis' }
+    'EMACrossOver' = @{ Label = 'EMA BOT'; Title = 'EMACrossOver'; FilePrefix = 'EMARoundTripsAnalysis' }
+}
+
+# ============================================================
+# STEP 1: Discover each tracked strategy's ORDER IDs (and their accounts)
 # ============================================================
 $logFiles = Get-ChildItem -Path $LogPath -Filter "log.*.txt" |
     Where-Object { $_.Name -notmatch '\.en\.txt$' } |
@@ -69,56 +79,67 @@ if (-not $logFiles) {
 
 Write-Host "Processing $($logFiles.Count) log file(s)..." -ForegroundColor Cyan
 
-# The strategy trace logs "... 'SMACrossOver/<id>' submitting order", near (not always
+# Each strategy trace logs "... '<StrategyName>/<id>' submitting order", near (not always
 # immediately after - NT8 sometimes logs the order's own Order='<id>/<account>' state line
 # a line or two BEFORE the trace fires, e.g. on instant-fill market orders) an order-state
 # line containing Order='<orderId>/<account>'. Rather than assuming strict next-line order,
 # find every "submitting order" trace, then scan a small window of lines around it (both
-# directions) for the first Order='<id>/<account>' line. Collecting order IDs this way lets
-# us attribute each fill to the bot specifically, so DISCRETIONARY/MANUAL trades in the same
-# account are EXCLUDED.
-$ttpOrderIds = @{}
-$ttpAccounts = @{}
+# directions) for the first Order='<id>/<account>' line. Collecting order IDs per strategy
+# lets us attribute each fill to its specific bot, so DISCRETIONARY/MANUAL trades in the
+# same accounts are EXCLUDED from every bot's book.
+$strategyOrderIds = [ordered]@{}
+foreach ($name in $StrategyBooks.Keys) { $strategyOrderIds[$name] = @{} }
+$ttpAccounts = @{}   # union of accounts touched by ANY tracked strategy
 $ProximityWindow = 4   # lines to search before/after a "submitting order" trace
+$strategyNamePattern = ($StrategyBooks.Keys | ForEach-Object { [regex]::Escape($_) }) -join '|'
 
 foreach ($file in $logFiles) {
     $lines = Get-Content $file.FullName
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -notmatch "NinjaScript strategy 'SMACrossOver/\d+' submitting order") { continue }
+        $m = [regex]::Match($lines[$i], "NinjaScript strategy '($strategyNamePattern)/\d+' submitting order")
+        if (-not $m.Success) { continue }
+        $stratName = $m.Groups[1].Value
         $lo = [math]::Max(0, $i - $ProximityWindow)
         $hi = [math]::Min($lines.Count - 1, $i + $ProximityWindow)
         for ($j = $lo; $j -le $hi; $j++) {
             if ($j -eq $i) { continue }
             if ($lines[$j] -match "Order='([^/']+)/([^']+)'") {
-                $ttpOrderIds[$Matches[1]] = $true
+                $strategyOrderIds[$stratName][$Matches[1]] = $true
                 $ttpAccounts[$Matches[2]] = $true
             }
         }
     }
 }
 
-if ($ttpOrderIds.Count -eq 0) {
-    Write-Error "No SMACrossOver orders found in any log file."
+$totalOrderIds = ($strategyOrderIds.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+if ($totalOrderIds -eq 0) {
+    Write-Error "No orders found for any tracked strategy ($($StrategyBooks.Keys -join ', ')) in any log file."
     exit 1
 }
 
 $accountSet = ($ttpAccounts.Keys | Sort-Object) -join ', '
-Write-Host "SMACrossOver accounts: $accountSet" -ForegroundColor Cyan
-Write-Host "SMACrossOver order IDs found : $($ttpOrderIds.Count)" -ForegroundColor Cyan
+Write-Host "Tracked accounts: $accountSet" -ForegroundColor Cyan
+foreach ($name in $StrategyBooks.Keys) {
+    Write-Host "$name order IDs found : $($strategyOrderIds[$name].Count)" -ForegroundColor Cyan
+}
 
 # ============================================================
 # STEP 2: Reconstruct round trips from executions, split into
-#         MA BOT fills vs DISCRETIONARY (non-strategy) fills
+#         one book per tracked strategy, plus DISCRETIONARY
+#         (fills in tracked accounts not from any tracked strategy)
 # ============================================================
 # Position state is rebuilt independently per book from execution fills.
-# BOT book:  fills whose Order ID was submitted by the strategy.
-#         MA BOT fills vs DISCRETIONARY (non-strategy) fills
-#            ATM, other strategies). Accounts the bot never touched in
-#            these logs are out of scope entirely.
+# Each strategy book: fills whose Order ID was submitted by that strategy.
+# DISCRETIONARY book: fills in a tracked account that came from neither
+#   tracked strategy (manual trades, ATM orders, an untracked strategy...).
+#   Accounts no tracked strategy ever touched in these logs are out of scope entirely.
 # Market position on an execution line: Long = buy fill, Short = sell fill.
-$botBook  = @{ Name = 'MA BOT';       Open = @{}; Trades = [System.Collections.ArrayList]::new() }
+$books = [ordered]@{}
+foreach ($name in $StrategyBooks.Keys) {
+    $books[$name] = @{ Name = $StrategyBooks[$name].Label; Open = @{}; Trades = [System.Collections.ArrayList]::new() }
+}
 $discBook = @{ Name = 'DISCRETIONARY'; Open = @{}; Trades = [System.Collections.ArrayList]::new() }
-$script:nonTtpExecCount = 0  # executions in MA accounts NOT from the strategy
+$script:nonTtpExecCount = 0  # executions in tracked accounts NOT from any tracked strategy
 
 function Close-RoundTrip($st, $bucket) {
     if ($st.EntryQty -le 0 -or $st.ExitQty -le 0) { return }
@@ -156,8 +177,12 @@ foreach ($file in $logFiles) {
 
         # --- Order-ID attribution: route each fill to its book ---
         if ($line -notmatch "Order='([^/']+)") { continue } ; $ordId = $Matches[1]
-        if ($ttpOrderIds.ContainsKey($ordId)) {
-            $book = $botBook
+        $matchedStrategy = $null
+        foreach ($name in $strategyOrderIds.Keys) {
+            if ($strategyOrderIds[$name].ContainsKey($ordId)) { $matchedStrategy = $name; break }
+        }
+        if ($matchedStrategy) {
+            $book = $books[$matchedStrategy]
             $isManual = $false
         } elseif ($ttpAccounts.ContainsKey($acct)) {
             $book = $discBook
@@ -174,25 +199,32 @@ foreach ($file in $logFiles) {
         while ($signed -ne 0) {
             if (-not $book.Open.ContainsKey($key)) {
                 # A manual fill with no open DISC position to close first offsets an
-                # opposite open BOT position: someone flattened the bot by hand.
-                # The bot round trip completes with a ManualExit flag instead of a
-                # fictitious DISC hedge that would leave both books unflat forever.
-                if ($isManual -and $botBook.Open.ContainsKey($key)) {
-                    $bst = $botBook.Open[$key]
-                    $oppBot = (($bst.Net -gt 0) -and ($signed -lt 0)) -or (($bst.Net -lt 0) -and ($signed -gt 0))
-                    if ($oppBot) {
-                        $closable = [math]::Min([math]::Abs($signed), [math]::Abs($bst.Net))
-                        $bst.ExitQty   += $closable
-                        $bst.ExitValue += $px * $closable
-                        $bst.ExitTime   = $timestamp
-                        $bst.ManualExit = $true
-                        $bst.Net       += if ($signed -gt 0) { $closable } else { -$closable }
-                        $signed        += if ($signed -gt 0) { -$closable } else { $closable }
-                        if ($bst.Net -eq 0) {
-                            Close-RoundTrip $bst $botBook.Trades
-                            $botBook.Open.Remove($key)
+                # opposite open position in whichever strategy book holds one: someone
+                # flattened that bot by hand. The bot round trip completes with a
+                # ManualExit flag instead of a fictitious DISC hedge that would leave
+                # both books unflat forever.
+                if ($isManual) {
+                    $hitBook = $null
+                    foreach ($name in $books.Keys) {
+                        if ($books[$name].Open.ContainsKey($key)) { $hitBook = $books[$name]; break }
+                    }
+                    if ($hitBook) {
+                        $bst = $hitBook.Open[$key]
+                        $oppBot = (($bst.Net -gt 0) -and ($signed -lt 0)) -or (($bst.Net -lt 0) -and ($signed -gt 0))
+                        if ($oppBot) {
+                            $closable = [math]::Min([math]::Abs($signed), [math]::Abs($bst.Net))
+                            $bst.ExitQty   += $closable
+                            $bst.ExitValue += $px * $closable
+                            $bst.ExitTime   = $timestamp
+                            $bst.ManualExit = $true
+                            $bst.Net       += if ($signed -gt 0) { $closable } else { -$closable }
+                            $signed        += if ($signed -gt 0) { -$closable } else { $closable }
+                            if ($bst.Net -eq 0) {
+                                Close-RoundTrip $bst $hitBook.Trades
+                                $hitBook.Open.Remove($key)
+                            }
+                            continue
                         }
-                        continue
                     }
                 }
                 # Opening a new position
@@ -236,36 +268,43 @@ foreach ($file in $logFiles) {
     }
 }
 
-foreach ($book in @($botBook, $discBook)) {
+foreach ($book in (@($books.Values) + $discBook)) {
     foreach ($st in $book.Open.Values) {
         Write-Warning "[$($book.Name)] Open position not flat at end of logs: $($st.Instrument) $($st.Account) entry=$($st.EntryTime) net=$($st.Net) - skipped."
     }
 }
 
 if ($nonTtpExecCount -gt 0) {
-    Write-Host "Routed $nonTtpExecCount non-strategy execution(s) in MA accounts to the DISCRETIONARY book." -ForegroundColor Yellow
+    Write-Host "Routed $nonTtpExecCount non-strategy execution(s) in tracked accounts to the DISCRETIONARY book." -ForegroundColor Yellow
 }
 
-if ($botBook.Trades.Count -eq 0 -and $discBook.Trades.Count -eq 0) {
-    Write-Host "`nNo complete round trips found in either book." -ForegroundColor Yellow
+$anyTrades = ($books.Values | ForEach-Object { $_.Trades.Count } | Measure-Object -Sum).Sum + $discBook.Trades.Count
+if ($anyTrades -eq 0) {
+    Write-Host "`nNo complete round trips found in any book." -ForegroundColor Yellow
     exit 0
 }
 
 # ============================================================
 # REPORT SETS: run the full analysis once per book
 # ============================================================
-$reportSets = @(
-    @{ Label = 'MA BOT'
-       Title = 'SMACrossOver'
-       Trades = $botBook.Trades
-       FilePrefix = 'MARoundTripsAnalysis'
-       FilterNote = "SMACrossOver strategy fills only ($nonTtpExecCount non-strategy execution(s) in these accounts routed to the DISCRETIONARY report)" },
-    @{ Label = 'DISCRETIONARY'
-       Title = 'DISCRETIONARY (manual trades in MA accounts)'
-       Trades = $discBook.Trades
-       FilePrefix = 'DISCRoundTripsAnalysis'
-       FilterNote = "Non-strategy (manual) fills in MA accounts only" }
-)
+$reportSets = [System.Collections.ArrayList]::new()
+foreach ($name in $StrategyBooks.Keys) {
+    $cfg = $StrategyBooks[$name]
+    $null = $reportSets.Add(@{
+        Label = $cfg.Label
+        Title = $cfg.Title
+        Trades = $books[$name].Trades
+        FilePrefix = $cfg.FilePrefix
+        FilterNote = "$name strategy fills only ($nonTtpExecCount non-strategy execution(s) in these accounts routed to the DISCRETIONARY report)"
+    })
+}
+$null = $reportSets.Add(@{
+    Label = 'DISCRETIONARY'
+    Title = 'DISCRETIONARY (manual trades in tracked accounts)'
+    Trades = $discBook.Trades
+    FilePrefix = 'DISCRoundTripsAnalysis'
+    FilterNote = "Non-strategy (manual) fills in tracked accounts only"
+})
 
 foreach ($set in $reportSets) {
 
